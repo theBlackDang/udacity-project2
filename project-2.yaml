@@ -1,0 +1,169 @@
+Parameters:
+  VpcCIDR: 
+    Description: CIDR of VPC
+    Type: String
+  EnvironmentName:
+    Description: Name of the environment
+    Type: String
+  PrivateSubnet1CIDR:
+    Description: CIDR of private subnet 1
+    Type: String
+  PrivateSubnet2CIDR:
+    Description: CIDR of private subnet 2
+    Type: String
+  AMItoUse:
+    Description: AMI to use for our base image
+    Type: String
+  VpcID:
+    Description: VPC ID
+    Type: String
+  SubnetForServer:
+    Description: Subnet to be used for our Web Server
+    Type: AWS::EC2::Subnet::Id
+
+Resources:
+  VPC: 
+      Type: AWS::EC2::VPC
+      Properties:
+          CidrBlock: !Ref VpcCIDR
+          EnableDnsHostnames: true
+          EnableDnsSupport: true
+          Tags: 
+            - Key: Name
+              Value: !Ref EnvironmentName 
+  PrivateSubnet1:
+      Type: AWS::EC2::Subnet
+      Properties:
+          VpcId: !Ref VpcID
+          AvailabilityZone: !Select [ 0, !GetAZs '' ]
+          CidrBlock: !Ref PrivateSubnet1CIDR
+          MapPublicIpOnLaunch: false
+          Tags: 
+              - Key: Name 
+                Value: !Sub ${EnvironmentName} Private Subnet (AZ1)
+
+  PrivateSubnet2: 
+      Type: AWS::EC2::Subnet
+      Properties:
+          VpcId: !Ref VpcID
+          AvailabilityZone: !Select [ 1, !GetAZs '' ]
+          CidrBlock: !Ref PrivateSubnet2CIDR
+          MapPublicIpOnLaunch: false
+          Tags: 
+              - Key: Name 
+                Value: !Sub ${EnvironmentName} Private Subnet (AZ2)
+
+# IAM Role to allow EC2 Session Manager to access our server
+  RoleForSSMAccess: 
+      Type: "AWS::IAM::Role"
+      Properties:
+          AssumeRolePolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+              - Effect: Allow
+              Principal:
+                  Service:
+                      - ec2.amazonaws.com
+                  Action:
+                  - 'sts:AssumeRole'
+            # Description: IAM Role to allow EC2 Session Manager to access our server
+          ManagedPolicyArns:
+            - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+            
+# Instance Profile
+  InstanceProfile: 
+      Type: "AWS::IAM::InstanceProfile"
+      Properties:
+        Roles: 
+          - !Ref RoleForSSMAccess
+
+# Security Group
+  WebAccessSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+          GroupDescription: Allow http to our test host
+          VpcId: !Ref VpcID
+          SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: 0.0.0.0/0
+          SecurityGroupEgress:
+          - IpProtocol: -1
+            FromPort: -1
+            ToPort: -1
+            CidrIp: 0.0.0.0/0
+  
+  WebAppLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo apt-get update -y
+          sudo apt-get install apache2 -y
+          sudo systemctl start apache2.service          
+    # ToDo: AMI ID of Ubuntu Linux machine. Too get one, try creating a VM from the web console. 
+      ImageId: !Ref AMItoUse
+      # ToDo: Change the key-pair name, as applicable to you. 
+      KeyName: NguyenHaiDang
+      SecurityGroups:
+      - Ref: WebAccessSecurityGroup
+      InstanceType: t3.medium
+      BlockDeviceMappings:
+      - DeviceName: "/dev/sdk"
+        Ebs:
+          VolumeSize: '10'
+
+# Server EC2 Instance
+  ServerInstance: 
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: !Ref AMItoUse
+      IamInstanceProfile: !Ref InstanceProfile
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          GroupSet: 
+            - Ref: "WebAccessSecurityGroup"
+          SubnetId: 
+            Ref: "SubnetForServer"
+
+  WebAppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 8080
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: 
+        Fn::ImportValue:
+          Fn::Sub: "${EnvironmentName}-VPCID"
+
+  WebAppGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - Fn::ImportValue: 
+          !Sub "${EnvironmentName}-PRIV-NETS"
+      LaunchConfigurationName:
+        Ref: WebAppLaunchConfig
+      MinSize: '3'
+      MaxSize: '5'
+      TargetGroupARNs:
+      - Ref: WebAppTargetGroup
+      HealthCheckGracePeriod: 60
+      HealthCheckType: ELB
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+        VpcId: !Ref VpcID
+        Tags: 
+            - Key: Name 
+              Value: !Sub ${EnvironmentName} Routes
