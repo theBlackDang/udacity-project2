@@ -8,20 +8,20 @@
 		"ParameterValue": "Udagram"
 	},
 	{
+		"ParameterKey": "ManagedPolicies",
+		"ParameterValue": "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore,arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+	},
+	{
 		"ParameterKey": "PrivateSubnet1CIDR",
 		"ParameterValue": "10.0.2.0/24"
 	},
-	{
-        "ParameterKey": "SubnetForServer",
-        "ParameterValue": "subnet-086fb2bdbcbd5fd67"
-    },
 	{
 		"ParameterKey": "PrivateSubnet2CIDR",
 		"ParameterValue": "10.0.2.0/24"
 	},
 	{
         "ParameterKey": "AMItoUse",
-        "ParameterValue": "ami-047a51fa27710816e"
+        "ParameterValue": "ami-0747bdcabd34c712a"
       },
 	  {
         "ParameterKey": "VpcID",

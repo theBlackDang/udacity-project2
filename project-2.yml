@@ -1,0 +1,288 @@
+﻿Parameters:
+
+    VpcCIDR: 
+        Description: CIDR of VPC
+        Type: String
+    EnvironmentName:
+        Description: Name of the environment
+        Type: String
+    PrivateSubnet1CIDR:
+        Description: CIDR of private subnet 1
+        Type: String
+    PrivateSubnet2CIDR:
+        Description: CIDR of private subnet 2
+        Type: String
+    AMItoUse:
+        Description: AMI to use for our base image
+        Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    VpcID:
+        Description: VPC ID
+        Type: String
+    ManagedPolicies:
+        Description: "The AWS Managed Policy for the EC2 Instance Role"
+        Type: CommaDelimitedList
+    KeyPair:
+        Description: "AWS key pair in us-east-1, stored in SSM Parameter Store"
+        Type: AWS::SSM::Parameter::Value<AWS::EC2::KeyPair::KeyName>
+        
+
+Resources:
+    VPC: 
+        Type: AWS::EC2::VPC
+        Properties:
+            CidrBlock: !Ref VpcCIDR
+            EnableDnsHostnames: true
+            EnableDnsSupport: true
+            Tags: 
+                - Key: Name
+                  Value: !Ref EnvironmentName 
+
+    PrivateSubnet1:
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref VpcID
+            AvailabilityZone: !Select [ 0, !GetAZs '' ]
+            CidrBlock: !Ref PrivateSubnet1CIDR
+            MapPublicIpOnLaunch: false
+            Tags: 
+                - Key: Name 
+                  Value: !Sub ${EnvironmentName} Private Subnet (AZ1)
+
+    PrivateSubnet2: 
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref VpcID
+            AvailabilityZone: !Select [ 1, !GetAZs '' ]
+            CidrBlock: !Ref PrivateSubnet2CIDR
+            MapPublicIpOnLaunch: false
+            Tags: 
+                - Key: Name 
+                  Value: !Sub ${EnvironmentName} Private Subnet (AZ2)
+
+# IAM Role to allow EC2 Session Manager to access our server
+    RoleForSSMAccess: 
+        Type: "AWS::IAM::Role"
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                   - Effect: Allow
+                     Principal:
+                         Service:
+                             - ec2.amazonaws.com
+                     Action:
+                         - 'sts:AssumeRole'
+            Description: IAM Role to allow EC2 Session Manager to access our server
+            ManagedPolicyArns: !Ref ManagedPolicies
+            Tags:
+                -   Key: "Name"
+                    Value:
+                        Fn::Join:
+                            - ""
+                            -   - !Ref EnvironmentName
+                                - "-web-server-iam-role-"
+                                -   Ref: "AWS::Region"
+            
+# Instance Profile
+    InstanceProfile: 
+        Type: "AWS::IAM::InstanceProfile"
+        Properties:
+          Roles: 
+              - !Ref RoleForSSMAccess
+
+# Security Group
+    WebAccessSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Allow http to our test host
+            VpcId: !Ref VpcID
+            SecurityGroupIngress:
+            - IpProtocol: tcp
+              FromPort: 80
+              ToPort: 80
+              CidrIp: 0.0.0.0/0
+            SecurityGroupEgress:
+            - IpProtocol: -1
+              FromPort: -1
+              ToPort: -1
+              CidrIp: 0.0.0.0/0
+  
+    WebAppLaunchConfig:
+        Type: AWS::AutoScaling::LaunchConfiguration
+        Properties:
+            UserData:
+                Fn::Base64: |
+                    #!/bin/bash
+                    sudo apt-get update -y
+                    sudo apt-get install apache2 -y
+                    sudo systemctl start apache2.service          
+    # ToDo: AMI ID of Ubuntu Linux machine. Too get one, try creating a VM from the web console. 
+            ImageId: !Ref AMItoUse
+      # ToDo: Change the key-pair name, as applicable to you. 
+            KeyName: NguyenHaiDang
+            SecurityGroups:
+                - Ref: WebAccessSecurityGroup
+            InstanceType: t3.medium
+            BlockDeviceMappings:
+                - DeviceName: "/dev/sdk"
+                  Ebs:
+                      VolumeSize: '10'
+
+# Server EC2 Instance
+    ServerInstance: 
+        Type: AWS::EC2::Instance
+        Properties:
+          InstanceType: t3.micro
+          ImageId: !Ref AMItoUse
+          IamInstanceProfile: !Ref InstanceProfile
+          NetworkInterfaces: 
+             -    AssociatePublicIpAddress: "true"
+                  DeviceIndex: "0"
+                  GroupSet: 
+                      - Ref: "WebAccessSecurityGroup"
+                  SubnetId: 
+                      Fn::ImportValue: !Join
+                                      - ""
+                                      -   - !Ref EnvironmentName
+                                          - "-private-subnet-"
+                                          - !Ref AWS::Region
+          UserData:
+                Fn::Base64: |
+                    #!/bin/bash
+                    yum update -y
+                    yum install -y httpd.x86_64
+                    systemctl start httpd.service
+                    systemctl enable httpd.service
+          Tags:
+                - Key: "Name"
+                  Value: !Join
+                      - ""
+                      -   - !Ref EnvironmentName
+                          - "-web-server-"
+                          - !Ref AWS::Region
+
+    WebServerTargetGroup:
+          Type: AWS::ElasticLoadBalancingV2::TargetGroup
+          Properties:
+              HealthCheckIntervalSeconds: 10
+              HealthCheckPath: /
+              HealthCheckProtocol: HTTP
+              HealthCheckTimeoutSeconds: 8
+              HealthyThresholdCount: 2
+              Port: 8080
+              Protocol: HTTP
+              UnhealthyThresholdCount: 5
+              VpcId: 
+                Fn::ImportValue:
+                  Fn::Sub: "${EnvironmentName}-VPCID"
+
+    WebServerLaunchTemplate:
+        Type: AWS::EC2::LaunchTemplate
+        Properties:
+            LaunchTemplateData:
+                ImageId: !Ref AMItoUse
+                KeyName: !Ref KeyPair
+                InstanceType: t3.micro
+                BlockDeviceMappings:
+                    -   DeviceName: "/dev/sdk"
+                        Ebs:
+                            VolumeSize: "10"
+                SecurityGroupIds:
+                    -   Ref: "WebAccessSecurityGroup"
+                UserData:
+                    Fn::Base64: |
+                        #!/bin/bash
+                        apt-get update -y
+                        apt-get install apache2 -y
+                        systemctl start apache2.service
+                        cd /var/www/html
+                        echo "Udacity Demo Web Server Up and Running!" > index.html
+            LaunchTemplateName:
+                Fn::Join:
+                    - ""
+                    -   - !Ref EnvironmentName
+                        - "-web-server-launch-template-"
+                        -   Ref: "AWS::Region"
+
+    
+
+    WebAppGroup:
+        Type: AWS::AutoScaling::AutoScalingGroup
+        Properties:
+            VPCZoneIdentifier:
+                -   Fn::ImportValue:
+                        Fn::Join:
+                            - ""
+                            -   - !Ref EnvironmentName
+                                - "-private-subnets-"
+                                -   Ref: "AWS::Region"
+            CapacityRebalance: true
+            HealthCheckType: "ELB"
+            LaunchTemplate:
+                LaunchTemplateId:
+                    Ref: "WebServerLaunchTemplate"
+                Version:
+                    Fn::GetAtt: "WebServerLaunchTemplate.LatestVersionNumber"
+            MinSize: '4'
+            MaxSize: '6'
+            TargetGroupARNs:
+                -   Ref: "WebServerTargetGroup"
+            Tags:
+                -   Key: "Name"
+                    PropagateAtLaunch: false
+                    Value:
+                        Fn::Join:
+                            - ""
+                            -   - !Ref EnvironmentName
+                                - "-auto-scaling-"
+                                -   Ref: "AWS::Region"
+
+    PublicRouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties: 
+            VpcId: !Ref VpcID
+            Tags: 
+                - Key: Name 
+                  Value: !Sub ${EnvironmentName} Routes
+
+    WebAppLB:
+        Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+        Properties:
+            Subnets:
+                - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+                - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"
+            SecurityGroups:
+                - Ref: WebAccessSecurityGroup
+
+    Listener:
+        Type: AWS::ElasticLoadBalancingV2::Listener
+        Properties:
+            DefaultActions:
+                - Type: forward
+                  TargetGroupArn:
+                      Ref: WebServerTargetGroup
+            LoadBalancerArn:
+                Ref: WebAppLB
+            Port: '80'
+            Protocol: HTTP
+
+    ALBListenerRule:
+        Type: AWS::ElasticLoadBalancingV2::ListenerRule
+        Properties:
+            Actions:
+                - Type: forward
+                  TargetGroupArn: !Ref 'WebServerTargetGroup'
+            Conditions:
+                - Field: path-pattern
+                  Values: [/]
+            ListenerArn: !Ref 'Listener'
+            Priority: 1
+
+
+  # Outputs:
+
+  #   PrivateSubnets:
+  #       Description: A list of the private subnets
+  #       Value: !Join [ ",", [ !Ref PrivateSubnet1, !Ref PrivateSubnet2 ]]
+  #       Export:
+  #         Name: !Sub ${EnvironmentName}-PRIV-NETS
